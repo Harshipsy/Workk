@@ -28,34 +28,33 @@ def enable_sqlite_fk(dbapi_connection, connection_record):
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
 
-# ---------------- CONFIG ----------------
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DB_DIR = os.path.join(BASE_DIR, "data")
-os.makedirs(DB_DIR, exist_ok=True)
-db_url = os.environ.get("DATABASE_URL")
-if db_url.startswith("postgres://"):
-    # Render sometimes gives deprecated URL form
-    db_url = db_url.replace("postgres://", "postgresql://", 1)
 
-app.config["SQLALCHEMY_DATABASE_URI"] = db_url
-
+# -----------------------------------------------------
+#                FLASK APP INITIALIZATION
+# -----------------------------------------------------
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "ABC"  # keep this
+app.config["SECRET_KEY"] = "ABC"
 
-# ---------------- PostgreSQL CONFIG ----------------
+
+# -----------------------------------------------------
+#                POSTGRES CONFIGURATION
+# -----------------------------------------------------
 db_url = os.environ.get("DATABASE_URL")
 
-# Render sometimes gives "postgres://" (deprecated)
 if db_url and db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
 app.config["SQLALCHEMY_DATABASE_URI"] = db_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-# Initialize database
+
+# -----------------------------------------------------
+#                 INITIALIZE DATABASE
+# -----------------------------------------------------
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
+
 
 # Timezone: IST
 TZ = pytz.timezone("Asia/Kolkata")
@@ -674,6 +673,7 @@ def export():
 # ---------------- RUN ----------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 
