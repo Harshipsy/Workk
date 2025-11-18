@@ -188,7 +188,7 @@ with app.app_context():
         admin = User(
             fullname="Admin",
             username="Admin",
-            password_hash=generate_password_hash("123"),
+            password_hash=generate_password_hash("2264"),
             email="admin@example.com",
             is_admin=True
         )
@@ -660,3 +660,4 @@ def export():
 # ---------------- RUN ----------------
 if __name__ == "__main__":
     app.run(debug=True)
+
