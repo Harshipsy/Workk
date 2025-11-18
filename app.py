@@ -19,7 +19,7 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 import calendar
 from datetime import date as pydate
-from openpyxl import Workbook     # <-- used to generate Excel without pandas
+from openpyxl import Workbook
 
 
 @event.listens_for(Engine, "connect")
@@ -35,7 +35,7 @@ os.makedirs(DB_DIR, exist_ok=True)
 DB_PATH = os.path.join(DB_DIR, "worktracker.db")
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "ABC"  # change in production
+app.config["SECRET_KEY"] = "ABC"
 app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{DB_PATH}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
@@ -131,6 +131,54 @@ def is_late(submitted_on, work_date):
     return submitted > end_of_day(work_date)
 
 
+def calculate_user_score(user_id, year, month):
+    today = today_ist()
+    _, last_day = calendar.monthrange(year, month)
+    start_date = ddate(year, month, 1)
+    end_of_month = ddate(year, month, last_day)
+    considered_end = min(end_of_month, today)
+
+    dates = []
+    d = start_date
+    while d <= considered_end:
+        dates.append(d)
+        d += timedelta(days=1)
+
+    locks = SubmissionLock.query.filter(
+        SubmissionLock.user_id == user_id,
+        SubmissionLock.work_date >= start_date,
+        SubmissionLock.work_date <= considered_end
+    ).all()
+    lock_map = {l.work_date: l for l in locks}
+
+    on_time = 0
+    late = 0
+    leave = 0
+    not_sub = 0
+
+    for d in dates:
+        if d.weekday() == 6:
+            continue
+        lock = lock_map.get(d)
+        if not lock:
+            not_sub += 1
+        else:
+            if lock.leave:
+                leave += 1
+            else:
+                if not is_late(lock.submitted_on, d):
+                    on_time += 1
+                else:
+                    late += 1
+
+    working_days = len([d for d in dates if d.weekday() != 6])
+    denom = working_days - leave
+    if denom <= 0:
+        pct = 100
+    else:
+        pct = round((on_time / denom) * 100)
+
+    return pct
 # ---------------- INIT DB + DEFAULT ADMIN ----------------
 with app.app_context():
     db.create_all()
@@ -169,7 +217,7 @@ def logout():
     return redirect(url_for("login"))
 
 
-# ---------------- DASHBOARD ----------------
+# ---------------- EMPLOYEE DASHBOARD ----------------
 @app.route("/")
 @login_required
 def dashboard():
@@ -188,7 +236,7 @@ def dashboard():
         y, m = map(int, month_val.split("-"))
     else:
         y, m = today_ist().year, today_ist().month
-
+    
     score_pct = calculate_user_score(current_user.id, y, m)
 
     return render_template("employee_dashboard.html",
@@ -201,7 +249,355 @@ def dashboard():
                            score_month=f"{y}-{m:02d}")
 
 
-# ---------------- EXPORT (NO PANDAS) ----------------
+# ---------------- SUBMIT ----------------
+@app.route("/submit/<date_str>", methods=["POST"])
+@login_required
+def submit(date_str):
+    if current_user.is_admin:
+        abort(403)
+    target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+    existing_lock = SubmissionLock.query.filter_by(user_id=current_user.id, work_date=target_date).first()
+    if existing_lock:
+        flash("Already submitted for that date (locked).", "warning")
+        return redirect(url_for("dashboard", date=target_date.isoformat()))
+
+    if not can_submit_for_date(target_date):
+        flash("Submission window for that date has closed.", "danger")
+        return redirect(url_for("dashboard", date=target_date.isoformat()))
+
+    completed = request.form.getlist("completed[]")
+    under = request.form.getlist("underprocess[]")
+    misc = request.form.getlist("misc[]")
+
+    to_add = []
+    now = datetime.now(TZ)
+    for line in completed:
+        line = (line or "").strip()
+        if line:
+            to_add.append(WorkItem(user_id=current_user.id, work_date=target_date, section="completed", content=line, created_at=now))
+    for line in under:
+        line = (line or "").strip()
+        if line:
+            to_add.append(WorkItem(user_id=current_user.id, work_date=target_date, section="underprocess", content=line, created_at=now))
+    for line in misc:
+        line = (line or "").strip()
+        if line:
+            to_add.append(WorkItem(user_id=current_user.id, work_date=target_date, section="misc", content=line, created_at=now))
+
+    if to_add:
+        db.session.add_all(to_add)
+
+    lock = SubmissionLock(user_id=current_user.id, work_date=target_date, submitted_on=now.astimezone(TZ), leave=False)
+    db.session.add(lock)
+    db.session.commit()
+
+    flash("Submitted and locked for that date.", "success")
+    return redirect(url_for("dashboard", date=target_date.isoformat()))
+
+
+# ---------------- MARK LEAVE ----------------
+@app.route("/mark_leave/<date_str>", methods=["POST", "GET"])
+@login_required
+def mark_leave(date_str):
+    if current_user.is_admin:
+        abort(403)
+    target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+    if not can_submit_for_date(target_date):
+        flash("Leave marking window closed for that date.", "danger")
+        return redirect(url_for("dashboard", date=target_date.isoformat()))
+
+    existing = SubmissionLock.query.filter_by(user_id=current_user.id, work_date=target_date).first()
+    if existing:
+        flash("Already marked/submitted for that date.", "warning")
+        return redirect(url_for("dashboard", date=target_date.isoformat()))
+
+    lock = SubmissionLock(user_id=current_user.id, work_date=target_date, submitted_on=datetime.now(TZ), leave=True)
+    db.session.add(lock)
+    db.session.commit()
+    flash("Marked as On Leave for that date.", "success")
+    return redirect(url_for("dashboard", date=target_date.isoformat()))
+
+
+# ---------------- CALENDAR STATUS ----------------
+@app.route("/calendar_status", methods=["GET"])
+@login_required
+def calendar_status():
+    start = request.args.get("start")
+    end = request.args.get("end")
+
+    today = today_ist()
+
+    if not start or not end:
+        start = today.replace(day=1).isoformat()
+        end = (today.replace(day=28) + timedelta(days=10)).isoformat()
+
+    start_date = datetime.strptime(start, "%Y-%m-%d").date()
+    end_date = datetime.strptime(end, "%Y-%m-%d").date()
+
+    locks = SubmissionLock.query.filter(
+        SubmissionLock.user_id == current_user.id,
+        SubmissionLock.work_date >= start_date,
+        SubmissionLock.work_date <= end_date
+    ).all()
+
+    lock_map = {l.work_date: l for l in locks}
+    result = {}
+
+    for offset in range((end_date - start_date).days + 1):
+        d = start_date + timedelta(days=offset)
+        key = d.isoformat()
+
+        if d > today:
+            result[key] = "grey"
+            continue
+
+        lock = lock_map.get(d)
+
+        if d == today:
+            if not lock:
+                result[key] = "yellow"
+            else:
+                if lock.leave:
+                    result[key] = "leave"
+                else:
+                    result[key] = "green" if not is_late(lock.submitted_on, d) else "orange"
+            continue
+
+        if not lock:
+            result[key] = "red"
+        else:
+            if lock.leave:
+                result[key] = "leave"
+            else:
+                result[key] = "green" if not is_late(lock.submitted_on, d) else "orange"
+
+    return jsonify(result)
+
+
+# ---------------- ADMIN DASHBOARD ----------------
+@app.route("/admin")
+@login_required
+def admin_dashboard():
+    if not current_user.is_admin:
+        return redirect(url_for("dashboard"))
+
+    date_str = request.args.get("date")
+    selected_date = datetime.strptime(date_str, "%Y-%m-%d").date() if date_str else today_ist()
+
+    min_date = (selected_date - timedelta(days=365)).isoformat()
+    max_date = today_ist().isoformat()
+
+    users = User.query.filter_by(is_admin=False).all()
+    locks = SubmissionLock.query.filter_by(work_date=selected_date).all()
+    lock_map = {l.user_id: l for l in locks}
+    all_items = WorkItem.query.filter_by(work_date=selected_date).all()
+
+    summary = []
+    for u in users:
+        user_items = [it for it in all_items if it.user_id == u.id]
+        lock = lock_map.get(u.id)
+        submitted_on = lock.submitted_on if lock else None
+        leave = lock.leave if lock else False
+        late = submitted_on and not leave and is_late(submitted_on, selected_date)
+
+        summary.append({
+            "name": u.fullname,
+            "work_items": user_items,
+            "submitted_on": submitted_on,
+            "leave": leave,
+            "late": late
+        })
+
+    summary.sort(key=lambda x: (x["submitted_on"] is None, x["submitted_on"]), reverse=True)
+
+    return render_template("admin_dashboard.html",
+                           summary=summary,
+                           selected_date=selected_date,
+                           min_date=min_date,
+                           max_date=max_date)
+
+
+# ---------------- ADMIN SCORECARD ----------------
+@app.route("/admin/scorecard", methods=["GET", "POST"])
+@login_required
+def admin_scorecard():
+    if not current_user.is_admin:
+        return redirect(url_for("dashboard"))
+
+    month_val = request.values.get("month")
+    today = today_ist()
+
+    if not month_val:
+        month_val = today.strftime("%Y-%m")
+
+    try:
+        year, month = map(int, month_val.split("-"))
+    except Exception:
+        flash("Invalid month selected", "danger")
+        return redirect(url_for("admin_dashboard"))
+
+    _, last_day = calendar.monthrange(year, month)
+    start_date = pydate(year, month, 1)
+    end_of_month = pydate(year, month, last_day)
+    considered_end = min(end_of_month, today)
+
+    dates = []
+    if start_date <= considered_end:
+        d = start_date
+        while d <= considered_end:
+            dates.append(d)
+            d += timedelta(days=1)
+
+    users = User.query.filter_by(is_admin=False).all()
+    locks = SubmissionLock.query.filter(
+        SubmissionLock.work_date >= start_date,
+        SubmissionLock.work_date <= considered_end
+    ).all()
+
+    lock_map = {(l.user_id, l.work_date): l for l in locks}
+    rows = []
+
+    for u in users:
+        on_time = 0
+        late = 0
+        leave = 0
+        not_submitted = 0
+
+        for d in dates:
+            if d.weekday() == 6:
+                continue
+
+            lock = lock_map.get((u.id, d))
+            if not lock:
+                not_submitted += 1
+            else:
+                if lock.leave:
+                    leave += 1
+                else:
+                    if not is_late(lock.submitted_on, d):
+                        on_time += 1
+                    else:
+                        late += 1
+
+        working_days = len([d for d in dates if d.weekday() != 6])
+        denom = working_days - leave
+
+        pct = 100 if denom <= 0 else round((on_time / denom) * 100)
+
+        rows.append({
+            "username": u.username,
+            "fullname": u.fullname,
+            "on_time": on_time,
+            "late": late,
+            "leave": leave,
+            "not_submitted": not_submitted,
+            "denom": denom,
+            "pct": pct
+        })
+
+    rows.sort(key=lambda x: x["pct"], reverse=True)
+
+    month_title = start_date.strftime("%B %Y")
+
+    return render_template("admin_scorecard.html",
+                           rows=rows,
+                           month_val=month_val,
+                           month_title=month_title,
+                           start_date=start_date,
+                           end_date=considered_end)
+
+
+# ---------------- EMPLOYEE MANAGEMENT ----------------
+@app.route("/admin/employees", methods=["GET", "POST"])
+@login_required
+def admin_employees():
+    if not current_user.is_admin:
+        abort(403)
+
+    if request.method == "POST":
+        fullname = request.form.get("fullname", "").strip()
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        email = request.form.get("email", "").strip()
+
+        if not (fullname and username and password and email):
+            flash("All fields are required.", "danger")
+            return redirect(url_for("admin_employees"))
+
+        existing = User.query.filter(func.lower(User.username) == username.lower()).first()
+        if existing:
+            flash("This username already exists.", "danger")
+            return redirect(url_for("admin_employees"))
+
+        prev = DeletedUsername.query.filter(func.lower(DeletedUsername.username) == username.lower()).first()
+        if prev:
+            flash("This username was used before and cannot be reused.", "danger")
+            return redirect(url_for("admin_employees"))
+
+        u = User(
+            fullname=fullname,
+            username=username,
+            password_hash=generate_password_hash(password),
+            email=email,
+            is_admin=False
+        )
+        db.session.add(u)
+        db.session.commit()
+        flash("Employee added", "success")
+        return redirect(url_for("admin_employees"))
+
+    employees = User.query.filter_by(is_admin=False).all()
+    return render_template("admin_employees.html", employees=employees)
+
+
+@app.route("/admin/employee/<int:user_id>/edit", methods=["GET", "POST"])
+@login_required
+def admin_employee_edit(user_id):
+    if not current_user.is_admin:
+        abort(403)
+
+    u = User.query.get_or_404(user_id)
+    if request.method == "POST":
+        u.fullname = request.form.get("fullname", u.fullname).strip()
+        u.email = request.form.get("email", u.email).strip()
+        pwd = request.form.get("password")
+        if pwd:
+            u.password_hash = generate_password_hash(pwd)
+        db.session.commit()
+        flash("Saved", "success")
+        return redirect(url_for("admin_employees"))
+    return render_template("admin_employee_edit.html", u=u)
+
+
+@app.route("/admin/employee/<int:user_id>/delete", methods=["POST"])
+@login_required
+def admin_employee_delete(user_id):
+    if not current_user.is_admin:
+        abort(403)
+
+    u = User.query.get_or_404(user_id)
+
+    try:
+        reserved = DeletedUsername(username=u.username)
+        db.session.add(reserved)
+    except Exception:
+        db.session.rollback()
+        reserved = DeletedUsername.query.filter_by(username=u.username).first()
+        if not reserved:
+            reserved = None
+
+    db.session.delete(u)
+    db.session.commit()
+
+    flash("Deleted employee and all their data.", "success")
+    return redirect(url_for("admin_employees"))
+
+
+# ---------------- EXPORT — REWRITTEN WITHOUT PANDAS ----------------
+from openpyxl import Workbook
+
 @app.route("/export", methods=["GET", "POST"])
 @login_required
 def export():
@@ -225,14 +621,9 @@ def export():
         else:
             query = query.filter(WorkItem.user_id == current_user.id)
 
-        query = query.filter(
-            WorkItem.work_date >= start_d,
-            WorkItem.work_date <= end_d
-        ).order_by(WorkItem.work_date.asc())
-
+        query = query.filter(WorkItem.work_date >= start_d, WorkItem.work_date <= end_d).order_by(WorkItem.work_date.asc())
         rows = query.all()
 
-        # ----------- CREATE EXCEL WITHOUT PANDAS -----------
         wb = Workbook()
         ws = wb.active
         ws.title = "WorkItems"
