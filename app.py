@@ -42,8 +42,15 @@ app.config["SQLALCHEMY_DATABASE_URI"] = db_url
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "ABC"
 
+# ---------------- PostgreSQL CONFIG ----------------
+db_url = os.environ.get("DATABASE_URL")
+if db_url and db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+
+app.config["SQLALCHEMY_DATABASE_URI"] = db_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
+# Initialize DB
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
@@ -665,5 +672,6 @@ def export():
 # ---------------- RUN ----------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
