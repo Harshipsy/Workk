@@ -22,12 +22,6 @@ from datetime import date as pydate
 from openpyxl import Workbook
 
 
-@event.listens_for(Engine, "connect")
-def enable_sqlite_fk(dbapi_connection, connection_record):
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.close()
-
 
 # -----------------------------------------------------
 #                FLASK APP INITIALIZATION
@@ -675,6 +669,7 @@ def export():
 # ---------------- RUN ----------------
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 
