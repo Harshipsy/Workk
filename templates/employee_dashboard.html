@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+
 <!-- SCORECARD BOX -->
 <div class="alert alert-primary d-flex justify-content-between align-items-center">
 
@@ -14,6 +15,7 @@
     </form>
 
 </div>
+
 <style>
 .card-box {
     background: #fff;
@@ -29,73 +31,70 @@
 .calendar-box {
     background: linear-gradient(135deg, #ffffff, #f8f9ff);
     border: 1px solid #d9d9d9;
-    padding: 18px;         /* reduced from 25px */
+    padding: 18px;
     border-radius: 16px;
     box-shadow: 0 4px 12px rgba(0,0,0,0.08);
 }
-
 
 /* Weekday header */
 .weekdays-grid {
     display: grid;
     grid-template-columns: repeat(7, 1fr);
-    margin-bottom: 4px;       /* reduced from 8px */
+    margin-bottom: 4px;
     font-weight: 700;
     text-align: center;
-    font-size: 14px;          /* slightly smaller */
+    font-size: 14px;
 }
-
 
 /* Calendar grid */
 .calendar-grid {
     display: grid;
     grid-template-columns: repeat(7, 1fr);
-    gap: 8px;          /* reduced from 12px */
+    gap: 8px;
     margin-top: 10px;
 }
 
-
 .day-cell {
-    padding: 10px;              /* reduced from 14px */
-    border-radius: 10px;        /* slightly smaller */
+    padding: 10px;
+    border-radius: 10px;
     text-align: center;
     font-weight: 600;
-    font-size: 14px;            /* reduced from 16px */
+    font-size: 14px;
     border: 1px solid #d1d1d1;
     transition: 0.2s ease-in-out;
 }
 
-
-/* Hover effect */
+/* Hover */
 .day-cell:hover {
     transform: scale(1.08);
     box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     cursor: pointer;
 }
 
-/* Sunday highlight */
+/* Sunday */
 .day-sunday {
     background: #cce6ff !important;
     border-color: #99ccff !important;
     color: #004d80 !important;
 }
 
-/* Today */
+/* Today style */
+/* Today should NOT grow or have border */
 .day-today {
-    border: 3px solid #0044ff !important;
-    box-shadow: 0 0 12px rgba(0, 102, 255, 0.6);
-    transform: scale(1.12);
-    /* REMOVE BACKGROUND, REMOVE COLOR OVERRIDE */
+    border: 1px solid #d1d1d1 !important;
+    box-shadow: none !important;
+    transform: none !important;
 }
 
 
+/* Status Colors */
+.day-yellow { background:#ffe066; }
+.day-orange { background:#ff9933; }
+.day-red    { background:#ff6666; }
+.day-green  { background:#66d98b; }
+.day-grey   { background:#e6e6e6; }
 
-/* COLORS */
-.day-yellow { background:#ffe066; color:#5c4300; border-color:#ffcc33; }
-.day-orange { background:#ff9933; color:#4d2600; border-color:#ff8000; }
-.day-red    { background:#ff6666; color:#4d0000; border-color:#ff3333;}
-.day-green  { background:#66d98b; color:#003300; border-color:#33cc6a;}
-.day-grey   { background:#e6e6e6; color:#595959; border-color:#cccccc;}
+/* Leave */
 .day-leave {
     background: #cce6ff !important;
     border-color: #99ccff !important;
@@ -103,7 +102,16 @@
     font-weight: 700;
 }
 
+/* Selected Date highlight */
+.day-selected {
+    border: 3px solid #2b78ff !important; /* strong blue */
+    color: #003366 !important;
+    box-shadow: 0 0 12px rgba(0, 102, 255, 0.6);
+    transform: scale(1.12);
+}
+
 </style>
+
 
 <!-- CALENDAR -->
 <div class="calendar-box mb-4">
@@ -122,12 +130,10 @@
 </div>
 
 
-<!-- WORK ENTRY AREA -->
+<!-- WORK AREA -->
 <div class="card-box">
 
     <h4 class="fw-bold mb-3">Work for {{ sel_date }}</h4>
-
-
 
 {% if lock and lock.leave %}
     <div class="alert alert-info">You marked leave for this date.</div>
@@ -135,16 +141,16 @@
 {% elif lock and not lock.leave %}
     <div class="alert alert-success">Work already submitted for this date.</div>
 
-    <!-- SHOW WORK IN READ-ONLY FORMAT -->
+    <!-- READ-ONLY VIEW -->
     <div class="mt-3">
 
         {% set completed = items | selectattr('section','equalto','completed') | list %}
         {% if completed %}
             <h5><b>Completed</b></h5>
             <ol>
-                {% for i in completed %}
-                    <li>{{ i.content }}</li>
-                {% endfor %}
+            {% for i in completed %}
+                <li>{{ i.content }}</li>
+            {% endfor %}
             </ol>
         {% endif %}
 
@@ -152,9 +158,9 @@
         {% if under %}
             <h5><b>Under Process</b></h5>
             <ol>
-                {% for i in under %}
-                    <li>{{ i.content }}</li>
-                {% endfor %}
+            {% for i in under %}
+                <li>{{ i.content }}</li>
+            {% endfor %}
             </ol>
         {% endif %}
 
@@ -162,9 +168,9 @@
         {% if misc %}
             <h5><b>Misc</b></h5>
             <ol>
-                {% for i in misc %}
-                    <li>{{ i.content }}</li>
-                {% endfor %}
+            {% for i in misc %}
+                <li>{{ i.content }}</li>
+            {% endfor %}
             </ol>
         {% endif %}
     </div>
@@ -173,22 +179,40 @@
     <div class="alert alert-danger">Submission window closed for this future date.</div>
 
 {% else %}
-    <!-- FORM FOR ENTERING NEW WORK -->
+    <!-- FORM ENTRY -->
     <form id="workForm" method="POST" action="{{ url_for('submit', date_str=sel_date.isoformat()) }}">
 
+        <!-- COMPLETED -->
         <div class="mb-3">
-            <div class="section-label">Completed</div>
-            <input name="completed[]" class="form-control work-input auto-add" placeholder="Type & Enter">
+            <div class="section-label d-flex justify-content-between">
+                <span>Completed</span>
+                <button type="button" class="btn btn-sm btn-outline-primary add-btn" data-target="completed[]">Add Task</button>
+            </div>
+            <div class="task-group">
+                <input name="completed[]" class="form-control work-input auto-add" placeholder="Type & Enter">
+            </div>
         </div>
 
+        <!-- UNDER PROCESS -->
         <div class="mb-3">
-            <div class="section-label">Under Process</div>
-            <input name="underprocess[]" class="form-control work-input auto-add" placeholder="Type & Enter">
+            <div class="section-label d-flex justify-content-between">
+                <span>Under Process</span>
+                <button type="button" class="btn btn-sm btn-outline-primary add-btn" data-target="underprocess[]">Add Task</button>
+            </div>
+            <div class="task-group">
+                <input name="underprocess[]" class="form-control work-input auto-add" placeholder="Type & Enter">
+            </div>
         </div>
 
+        <!-- MISC -->
         <div class="mb-3">
-            <div class="section-label">Misc</div>
-            <input name="misc[]" class="form-control work-input auto-add" placeholder="Type & Enter">
+            <div class="section-label d-flex justify-content-between">
+                <span>Misc</span>
+                <button type="button" class="btn btn-sm btn-outline-primary add-btn" data-target="misc[]">Add Task</button>
+            </div>
+            <div class="task-group">
+                <input name="misc[]" class="form-control work-input auto-add" placeholder="Type & Enter">
+            </div>
         </div>
 
         <button type="button" id="submitBtn" class="btn btn-primary">Submit</button>
@@ -196,7 +220,6 @@
 
     </form>
 {% endif %}
-
 
 </div>
 
@@ -226,6 +249,7 @@
 </div>
 
 
+
 <script>
 document.addEventListener("DOMContentLoaded", function () {
 
@@ -248,7 +272,6 @@ document.addEventListener("DOMContentLoaded", function () {
         const first = new Date(year, month, 1);
         const last  = new Date(year, month + 1, 0);
 
-        // WEEKDAY HEADER
         container.innerHTML = `
             <div class="weekdays-grid">
                 <div>Mon</div><div>Tue</div><div>Wed</div>
@@ -283,16 +306,29 @@ document.addEventListener("DOMContentLoaded", function () {
                 cell.className = `day-cell day-${color}`;
                 cell.textContent = d;
 
-                // Today border
+                /* Today */
                 if (key === "{{ today.isoformat() }}") {
-                    cell.classList.add("day-today");
+                    	
                 }
 
-                // Sunday (blue)
+                /* Selected date highlight */
+                if (key === "{{ sel_date.isoformat() }}") {
+                    cell.classList.add("day-selected");
+                }
+
+                /* Sunday style */
                 let w = new Date(year, month, d).getDay();
                 if (w === 0) cell.classList.add("day-sunday");
 
-                cell.onclick = () => window.location = `/?date=${key}`;
+                /* Click handler */
+                cell.onclick = () => {
+                    document.querySelectorAll(".day-selected")
+                        .forEach(x => x.classList.remove("day-selected"));
+                    cell.classList.add("day-selected");
+
+                    window.location = `/?date=${key}`;
+                };
+
                 grid.appendChild(cell);
             }
 
@@ -300,7 +336,7 @@ document.addEventListener("DOMContentLoaded", function () {
         });
     }
 
-    // Prev / Next buttons
+    /* Prev / Next */
     document.getElementById("prevMonth").onclick = () => {
         currentMonth--;
         if (currentMonth < 0) { currentMonth = 11; currentYear--; }
@@ -319,10 +355,7 @@ document.addEventListener("DOMContentLoaded", function () {
     loadCalendarA(currentYear, currentMonth);
 
 
-
-    /* =============================
-       Auto-add inputs
-    ============================== */
+    /* Auto-add inputs */
     document.addEventListener("keydown", function (e) {
         if (e.target.classList.contains("auto-add") && e.key === "Enter") {
             e.preventDefault();
@@ -334,9 +367,7 @@ document.addEventListener("DOMContentLoaded", function () {
     });
 
 
-    /* =============================
-       Submit modal
-    ============================== */
+    /* Submit modal */
     const sb = document.querySelector("#submitBtn");
     const modalElement = document.querySelector("#confirmModal");
 
@@ -355,6 +386,23 @@ document.addEventListener("DOMContentLoaded", function () {
         });
     }
 
+});
+
+
+/* Add Task button logic */
+document.querySelectorAll(".add-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+        const targetName = btn.dataset.target;
+        const group = btn.closest(".mb-3").querySelector(".task-group");
+
+        const inp = document.createElement("input");
+        inp.className = "form-control work-input auto-add mt-1";
+        inp.name = targetName;
+        inp.placeholder = "Type & Enter";
+
+        group.appendChild(inp);
+        inp.focus();
+    });
 });
 </script>
 
