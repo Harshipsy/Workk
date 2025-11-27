@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, time as dtime, date as ddate
 from io import BytesIO
 
 import pytz
-import pandas as pd
 from flask import (
     Flask, abort, flash, jsonify, redirect, render_template,
     request, send_file, url_for
@@ -18,15 +17,22 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy import func
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
+from openpyxl import Workbook  # ✔ Render-safe Excel
+
 import calendar
 from datetime import date as pydate
 
 
+# ---------------- SQLITE FK FIX ----------------
 @event.listens_for(Engine, "connect")
 def enable_sqlite_fk(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA foreign_keys=ON")
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    except:  # Supabase/Postgres will ignore
+        pass
     cursor.close()
+
 
 # ---------------- CONFIG ----------------
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -43,7 +49,7 @@ db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
 
-# Timezone: IST
+# IST Timezone
 TZ = pytz.timezone("Asia/Kolkata")
 
 
@@ -52,22 +58,18 @@ class User(db.Model, UserMixin):
     __tablename__ = "user"
     id = db.Column(db.Integer, primary_key=True)
     fullname = db.Column(db.String(150), nullable=False)
-    username = db.Column(db.String(150), unique=True, nullable=False)  # primary identity
+    username = db.Column(db.String(150), unique=True, nullable=False)
     password_hash = db.Column(db.String(256), nullable=False)
     email = db.Column(db.String(150))
     is_admin = db.Column(db.Boolean, default=False)
 
     db.relationship("WorkItem", backref="user", cascade="all, delete-orphan", passive_deletes=True)
 
-
     def check_password(self, pwd):
         return check_password_hash(self.password_hash, pwd)
 
 
 class DeletedUsername(db.Model):
-    """
-    Stores usernames that were used and then deleted, to prevent reuse.
-    """
     __tablename__ = "deleted_username"
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(150), unique=True, nullable=False)
@@ -81,8 +83,8 @@ class WorkItem(db.Model):
         db.ForeignKey("user.id", ondelete="CASCADE"),
         nullable=False
     )
-    work_date = db.Column(db.Date, nullable=False)   # date the work is for
-    section = db.Column(db.String(30), nullable=False)  # 'completed','underprocess','misc'
+    work_date = db.Column(db.Date, nullable=False)
+    section = db.Column(db.String(30), nullable=False)
     content = db.Column(db.String(512), nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(TZ))
 
@@ -96,7 +98,7 @@ class SubmissionLock(db.Model):
         nullable=False
     )
     work_date = db.Column(db.Date, nullable=False)
-    submitted_on = db.Column(db.DateTime, nullable=True)  # stored timezone-aware where possible
+    submitted_on = db.Column(db.DateTime, nullable=True)
     leave = db.Column(db.Boolean, default=False)
 
     __table_args__ = (db.UniqueConstraint('user_id', 'work_date', name='_user_date_uc'),)
@@ -108,29 +110,14 @@ def load_user(user_id):
     return User.query.get(int(user_id))
 
 
-# ---------------- UTIL FUNCTIONS ----------------
+# ---------------- UTIL ----------------
 def today_ist():
     return datetime.now(TZ).date()
 
 def end_of_day(dt_date: ddate):
-    # Returns IST-aware datetime at 23:59:59 for given date
     return TZ.localize(datetime.combine(dt_date, dtime(23, 59, 59)))
 
-def can_submit_for_date(target_date: ddate):
-    today = today_ist()
-
-    # ❌ Cannot submit future dates
-    if target_date > today:
-        return False
-
-    # ✔ All past dates are allowed
-    return True
-
-
 def ensure_aware(dt):
-    """
-    Convert naive datetime to IST-aware; if already aware, convert to IST.
-    """
     if dt is None:
         return None
     if dt.tzinfo is None:
@@ -138,50 +125,40 @@ def ensure_aware(dt):
     return dt.astimezone(TZ)
 
 def is_late(submitted_on, work_date):
-    """
-    True if submitted after work_date end (23:59:59 IST).
-    submitted_on may be naive or aware -> ensure comparison with aware datetimes.
-    """
     if not submitted_on:
         return True
     submitted = ensure_aware(submitted_on)
     return submitted > end_of_day(work_date)
 
+def can_submit_for_date(target_date: ddate):
+    today = today_ist()
+    if target_date > today:
+        return False
+    return True
+
 
 def calculate_user_score(user_id, year, month):
-    import calendar
     today = today_ist()
-
-    # Month range
     _, last_day = calendar.monthrange(year, month)
     start_date = ddate(year, month, 1)
-    end_of_month = ddate(year, month, last_day)
+    end_month = ddate(year, month, last_day)
+    considered_end = min(end_month, today)
 
-    # Do not go beyond today
-    considered_end = min(end_of_month, today)
-
-    # Generate dates
     dates = []
     d = start_date
     while d <= considered_end:
         dates.append(d)
         d += timedelta(days=1)
 
-    # Count Sundays
-    sundays = sum(1 for d in dates if d.weekday() == 6)
-
-    # Fetch locks
     locks = SubmissionLock.query.filter(
         SubmissionLock.user_id == user_id,
         SubmissionLock.work_date >= start_date,
         SubmissionLock.work_date <= considered_end
     ).all()
+
     lock_map = {l.work_date: l for l in locks}
 
-    on_time = 0
-    late = 0
-    leave = 0
-    not_sub = 0
+    on_time = late = leave = not_sub = 0
 
     for d in dates:
         if d.weekday() == 6:  # Sunday
@@ -201,20 +178,14 @@ def calculate_user_score(user_id, year, month):
 
     working_days = len([d for d in dates if d.weekday() != 6])
     denom = working_days - leave
-
-    if denom <= 0:
-        pct = 100
-    else:
-        pct = round((on_time / denom) * 100)
-
+    pct = 100 if denom <= 0 else round((on_time / denom) * 100)
     return pct
 
 
-# ---------------- INIT DB + DEFAULT ADMIN ----------------
+# ---------------- INIT DB ----------------
 with app.app_context():
     db.create_all()
 
-    # Create Admin user only if not present.
     admin = User.query.filter_by(username="Admin").first()
     if not admin:
         admin = User(
@@ -259,19 +230,15 @@ def dashboard():
     sel_date_str = request.args.get("date")
     sel_date = datetime.strptime(sel_date_str, "%Y-%m-%d").date() if sel_date_str else today_ist()
 
-    # Only lock determines whether submission happened
     lock = SubmissionLock.query.filter_by(user_id=current_user.id, work_date=sel_date).first()
-
-    # fetch existing items (if any) for display (not to decide whether locked)
     items = WorkItem.query.filter_by(user_id=current_user.id, work_date=sel_date).order_by(WorkItem.id.asc()).all()
 
-    # Scorecard month logic
     month_val = request.args.get("score_month")
     if month_val:
         y, m = map(int, month_val.split("-"))
     else:
         y, m = today_ist().year, today_ist().month
-    
+
     score_pct = calculate_user_score(current_user.id, y, m)
 
     return render_template("employee_dashboard.html",
@@ -284,7 +251,6 @@ def dashboard():
                            score_month=f"{y}-{m:02d}")
 
 
-
 @app.route("/submit/<date_str>", methods=["POST"])
 @login_required
 def submit(date_str):
@@ -292,43 +258,42 @@ def submit(date_str):
         abort(403)
     target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
 
-    # check if already locked/submitted
     existing_lock = SubmissionLock.query.filter_by(user_id=current_user.id, work_date=target_date).first()
     if existing_lock:
         flash("Already submitted for that date (locked).", "warning")
         return redirect(url_for("dashboard", date=target_date.isoformat()))
 
-    # check allowed back-posting window
     if not can_submit_for_date(target_date):
         flash("Submission window for that date has closed.", "danger")
         return redirect(url_for("dashboard", date=target_date.isoformat()))
 
-    # parse posted items
     completed = request.form.getlist("completed[]")
     under = request.form.getlist("underprocess[]")
     misc = request.form.getlist("misc[]")
 
-    # create WorkItem rows for non-empty trimmed lines
     to_add = []
     now = datetime.now(TZ)
     for line in completed:
         line = (line or "").strip()
         if line:
-            to_add.append(WorkItem(user_id=current_user.id, work_date=target_date, section="completed", content=line, created_at=now))
+            to_add.append(WorkItem(user_id=current_user.id, work_date=target_date,
+                                   section="completed", content=line, created_at=now))
     for line in under:
         line = (line or "").strip()
         if line:
-            to_add.append(WorkItem(user_id=current_user.id, work_date=target_date, section="underprocess", content=line, created_at=now))
+            to_add.append(WorkItem(user_id=current_user.id, work_date=target_date,
+                                   section="underprocess", content=line, created_at=now))
     for line in misc:
         line = (line or "").strip()
         if line:
-            to_add.append(WorkItem(user_id=current_user.id, work_date=target_date, section="misc", content=line, created_at=now))
+            to_add.append(WorkItem(user_id=current_user.id, work_date=target_date,
+                                   section="misc", content=line, created_at=now))
 
-    # Save items (if any) and lock
     if to_add:
         db.session.add_all(to_add)
 
-    lock = SubmissionLock(user_id=current_user.id, work_date=target_date, submitted_on=now.astimezone(TZ), leave=False)
+    lock = SubmissionLock(user_id=current_user.id, work_date=target_date,
+                          submitted_on=now.astimezone(TZ), leave=False)
     db.session.add(lock)
     db.session.commit()
 
@@ -349,40 +314,25 @@ def mark_leave(date_str):
 
     existing = SubmissionLock.query.filter_by(user_id=current_user.id, work_date=target_date).first()
     if existing:
-        flash("Already marked/submitted for that date.", "warning")
+        flash("Already submitted/marked for that date.", "warning")
         return redirect(url_for("dashboard", date=target_date.isoformat()))
 
-    lock = SubmissionLock(user_id=current_user.id, work_date=target_date, submitted_on=datetime.now(TZ), leave=True)
+    lock = SubmissionLock(user_id=current_user.id, work_date=target_date,
+                          submitted_on=datetime.now(TZ), leave=True)
     db.session.add(lock)
     db.session.commit()
-    flash("Marked as On Leave for that date.", "success")
+    flash("Marked as On Leave.", "success")
     return redirect(url_for("dashboard", date=target_date.isoformat()))
 
 
 # ---------------- CALENDAR STATUS ----------------
-@app.route("/calendar_status", methods=["GET"])
+@app.route("/calendar_status")
 @login_required
 def calendar_status():
-    """
-    Return per-date status for current user for a month range.
-    Colors:
-        future       = grey
-        today        = yellow (not submitted)
-                        green  (submitted on time)
-                        orange (submitted late)
-                        leave  (leave)
-        past
-            no submission     = red
-            leave             = leave
-            submitted on-time = green
-            submitted late    = orange
-    """
-
     start = request.args.get("start")
     end = request.args.get("end")
 
     today = today_ist()
-
     if not start or not end:
         start = today.replace(day=1).isoformat()
         end = (today.replace(day=28) + timedelta(days=10)).isoformat()
@@ -390,7 +340,6 @@ def calendar_status():
     start_date = datetime.strptime(start, "%Y-%m-%d").date()
     end_date = datetime.strptime(end, "%Y-%m-%d").date()
 
-    # fetch all locks
     locks = SubmissionLock.query.filter(
         SubmissionLock.user_id == current_user.id,
         SubmissionLock.work_date >= start_date,
@@ -398,36 +347,31 @@ def calendar_status():
     ).all()
 
     lock_map = {l.work_date: l for l in locks}
-
     result = {}
 
     for offset in range((end_date - start_date).days + 1):
         d = start_date + timedelta(days=offset)
         key = d.isoformat()
 
-        # Future = grey
         if d > today:
             result[key] = "grey"
             continue
 
         lock = lock_map.get(d)
 
-        # ---- TODAY LOGIC ----
         if d == today:
             if not lock:
-                result[key] = "yellow"  # not submitted yet
+                result[key] = "yellow"
             else:
                 if lock.leave:
                     result[key] = "leave"
                 else:
-                    # submitted today
                     if not is_late(lock.submitted_on, d):
-                        result[key] = "green"    # on-time
+                        result[key] = "green"
                     else:
-                        result[key] = "orange"   # late
+                        result[key] = "orange"
             continue
 
-        # ---- PAST ----
         if not lock:
             result[key] = "red"
         else:
@@ -450,10 +394,7 @@ def admin_dashboard():
         return redirect(url_for("dashboard"))
 
     date_str = request.args.get("date")
-    if date_str:
-        selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-    else:
-        selected_date = today_ist()
+    selected_date = datetime.strptime(date_str, "%Y-%m-%d").date() if date_str else today_ist()
 
     min_date = (selected_date - timedelta(days=365)).isoformat()
     max_date = today_ist().isoformat()
@@ -491,90 +432,65 @@ def admin_dashboard():
                            min_date=min_date,
                            max_date=max_date)
 
+
+# ---------------- ADMIN SCORECARD ----------------
 @app.route("/admin/scorecard", methods=["GET", "POST"])
 @login_required
 def admin_scorecard():
     if not current_user.is_admin:
         return redirect(url_for("dashboard"))
 
-    # month selector: value format "YYYY-MM"
     month_val = request.values.get("month")
     today = today_ist()
 
-    # default to current month
     if not month_val:
         month_val = today.strftime("%Y-%m")
 
-    try:
-        year, month = map(int, month_val.split("-"))
-    except Exception:
-        flash("Invalid month selected", "danger")
-        return redirect(url_for("admin_dashboard"))
-
-    # month range
+    year, month = map(int, month_val.split("-"))
     _, last_day = calendar.monthrange(year, month)
     start_date = pydate(year, month, 1)
-    end_of_month = pydate(year, month, last_day)
+    end_month = pydate(year, month, last_day)
+    considered_end = min(end_month, today)
 
-    # We only consider days up to today (can't count future days)
-    considered_end = min(end_of_month, today)
-
-    # list of dates to evaluate
     dates = []
     if start_date <= considered_end:
         d = start_date
         while d <= considered_end:
             dates.append(d)
-            d = d + timedelta(days=1)
-
-    # number of Sundays in considered range
-    sundays = sum(1 for d in dates if d.weekday() == 6)  # Sunday = 6 in datetime.weekday()
+            d += timedelta(days=1)
 
     users = User.query.filter_by(is_admin=False).all()
 
-    # fetch locks in the whole month (we'll map by user and date)
     locks = SubmissionLock.query.filter(
         SubmissionLock.work_date >= start_date,
         SubmissionLock.work_date <= considered_end
     ).all()
 
-    # map: (user_id, work_date) -> lock
     lock_map = {(l.user_id, l.work_date): l for l in locks}
 
     rows = []
     for u in users:
-        on_time = 0
-        late = 0
-        leave = 0
-        not_submitted = 0
+        on_time = late = leave = not_sub = 0
 
-        # for each considered date (exclude Sundays from denominator later)
         for d in dates:
             if d.weekday() == 6:
-                # Sunday, ignore for counting (not due)
                 continue
 
             lock = lock_map.get((u.id, d))
             if not lock:
-                not_submitted += 1
+                not_sub += 1
             else:
                 if lock.leave:
                     leave += 1
                 else:
-                    # submitted_on may be naive or aware -> use ensure_aware/is_late
                     if not is_late(lock.submitted_on, d):
                         on_time += 1
                     else:
                         late += 1
 
-        # denominator = (working days) - leave
         working_days = len([d for d in dates if d.weekday() != 6])
         denom = working_days - leave
-
-        if denom <= 0:
-            pct = 100  # your choice A
-        else:
-            pct = round((on_time / denom) * 100)
+        pct = 100 if denom <= 0 else round((on_time / denom) * 100)
 
         rows.append({
             "username": u.username,
@@ -582,15 +498,12 @@ def admin_scorecard():
             "on_time": on_time,
             "late": late,
             "leave": leave,
-            "not_submitted": not_submitted,
+            "not_submitted": not_sub,
             "denom": denom,
             "pct": pct
         })
 
-    # sort by pct desc
     rows.sort(key=lambda x: x["pct"], reverse=True)
-
-    # human readable month title
     month_title = start_date.strftime("%B %Y")
 
     return render_template("admin_scorecard.html",
@@ -601,7 +514,7 @@ def admin_scorecard():
                            end_date=considered_end)
 
 
-# ---------------- ADMIN: EMPLOYEE MANAGEMENT ----------------
+# ---------------- ADMIN EMPLOYEE MGMT ----------------
 @app.route("/admin/employees", methods=["GET", "POST"])
 @login_required
 def admin_employees():
@@ -618,16 +531,14 @@ def admin_employees():
             flash("All fields are required.", "danger")
             return redirect(url_for("admin_employees"))
 
-        # Prevent duplicates (case-insensitive) in active users
         existing = User.query.filter(func.lower(User.username) == username.lower()).first()
         if existing:
-            flash("This username already exists. Choose a different username.", "danger")
+            flash("This username already exists.", "danger")
             return redirect(url_for("admin_employees"))
 
-        # Prevent reuse of previously deleted usernames
         prev = DeletedUsername.query.filter(func.lower(DeletedUsername.username) == username.lower()).first()
         if prev:
-            flash("This username was used before and cannot be reused. Choose another.", "danger")
+            flash("This username was used before and cannot be reused.", "danger")
             return redirect(url_for("admin_employees"))
 
         u = User(
@@ -673,25 +584,20 @@ def admin_employee_delete(user_id):
 
     u = User.query.get_or_404(user_id)
 
-    # Reserve username so it cannot be recreated later
     try:
         reserved = DeletedUsername(username=u.username)
         db.session.add(reserved)
-    except Exception:
-        # ignore if unique constraint fails for some race condition
+    except:
         db.session.rollback()
-        reserved = DeletedUsername.query.filter_by(username=u.username).first()
-        if not reserved:
-            reserved = None
-    # Delete user (cascade should remove related work_items and locks)
+
     db.session.delete(u)
     db.session.commit()
 
-    flash("Deleted employee and all their data. Username reserved (cannot be reused).", "success")
+    flash("Deleted employee. Username reserved.", "success")
     return redirect(url_for("admin_employees"))
 
 
-# ---------------- EXPORT ----------------
+# ---------------- EXPORT (NO PANDAS) ----------------
 @app.route("/export", methods=["GET", "POST"])
 @login_required
 def export():
@@ -715,27 +621,41 @@ def export():
         else:
             query = query.filter(WorkItem.user_id == current_user.id)
 
-        query = query.filter(WorkItem.work_date >= start_d, WorkItem.work_date <= end_d).order_by(WorkItem.work_date.asc())
+        query = query.filter(
+            WorkItem.work_date >= start_d,
+            WorkItem.work_date <= end_d
+        ).order_by(WorkItem.work_date.asc())
+
         rows = query.all()
 
-        data = []
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "WorkItems"
+
+        headers = ["Name", "Username", "Work Date", "Section", "Content", "Posting Time"]
+        ws.append(headers)
+
         for r in rows:
             user = User.query.get(r.user_id)
-            data.append({
-                "Name": user.fullname,
-                "Username": user.username,
-                "Work Date": r.work_date.isoformat(),
-                "Section": r.section,
-                "Content": r.content,
-                "Posting Time": ensure_aware(r.created_at).strftime("%Y-%m-%d %H:%M:%S") if r.created_at else ""
-            })
+            ws.append([
+                user.fullname,
+                user.username,
+                r.work_date.isoformat(),
+                r.section,
+                r.content,
+                ensure_aware(r.created_at).strftime("%Y-%m-%d %H:%M:%S") if r.created_at else ""
+            ])
 
-        df = pd.DataFrame(data) if data else pd.DataFrame([{"Info": "No records found."}])
         output = BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="WorkItems")
+        wb.save(output)
         output.seek(0)
-        return send_file(output, download_name=f"workitems_{start}_to_{end}.xlsx", as_attachment=True, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        return send_file(
+            output,
+            download_name=f"workitems_{start}_to_{end}.xlsx",
+            as_attachment=True,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
     employees = User.query.filter_by(is_admin=False).all() if current_user.is_admin else []
     return render_template("export.html", employees=employees)
