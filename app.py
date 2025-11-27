@@ -42,7 +42,7 @@ DB_PATH = os.path.join(DB_DIR, "worktracker.db")
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "ABC"  # change in production
-app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{DB_PATH}"
+app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
@@ -664,3 +664,4 @@ def export():
 # ---------------- RUN ----------------
 if __name__ == "__main__":
     app.run(debug=True)
+
