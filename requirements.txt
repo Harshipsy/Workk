@@ -5,6 +5,7 @@ pytz==2024.2
 openpyxl==3.1.2
 Werkzeug==2.3.7
 gunicorn==21.2.0
-psycopg==3.1.18
+psycopg[binary]
+
 
 
